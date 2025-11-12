@@ -3,14 +3,13 @@ from flask_cors import CORS
 import os
 import PyPDF2
 import docx
-import textstat
 import nltk
 from nltk.tokenize import sent_tokenize, word_tokenize
 from nltk.corpus import stopwords
 import re
-import magic
+import math
 
-# Download NLTK data (run this once)
+# Download NLTK data
 try:
     nltk.data.find('tokenizers/punkt')
 except LookupError:
@@ -22,15 +21,14 @@ except LookupError:
     nltk.download('stopwords')
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+CORS(app)
 
 # Configuration
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 ALLOWED_EXTENSIONS = {'pdf', 'doc', 'docx', 'txt'}
 
 def allowed_file(filename):
-    return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def extract_text_from_pdf(file_path):
     """Extract text from PDF file"""
@@ -63,16 +61,105 @@ def extract_text_from_txt(file_path):
     except Exception as e:
         raise Exception(f"Error reading TXT file: {str(e)}")
 
+# Custom readability calculations (replacing textstat)
+def calculate_flesch_reading_ease(text):
+    """Calculate Flesch Reading Ease score"""
+    sentences = sent_tokenize(text)
+    words = word_tokenize(text)
+    
+    if len(sentences) == 0 or len(words) == 0:
+        return 0
+    
+    total_sentences = len(sentences)
+    total_words = len(words)
+    
+    # Count syllables (approximate)
+    syllable_count = 0
+    for word in words:
+        syllable_count += count_syllables(word)
+    
+    # Flesch Reading Ease formula
+    score = 206.835 - 1.015 * (total_words / total_sentences) - 84.6 * (syllable_count / total_words)
+    return max(0, min(100, score))
+
+def count_syllables(word):
+    """Approximate syllable count for a word"""
+    word = word.lower()
+    count = 0
+    vowels = "aeiouy"
+    
+    if word[0] in vowels:
+        count += 1
+        
+    for index in range(1, len(word)):
+        if word[index] in vowels and word[index - 1] not in vowels:
+            count += 1
+            
+    if word.endswith('e'):
+        count -= 1
+        
+    if count == 0:
+        count += 1
+        
+    return count
+
+def calculate_flesch_kincaid_grade(text):
+    """Calculate Flesch-Kincaid Grade Level"""
+    sentences = sent_tokenize(text)
+    words = word_tokenize(text)
+    
+    if len(sentences) == 0 or len(words) == 0:
+        return 0
+    
+    total_sentences = len(sentences)
+    total_words = len(words)
+    
+    # Count syllables
+    syllable_count = 0
+    for word in words:
+        syllable_count += count_syllables(word)
+    
+    # Flesch-Kincaid Grade Level formula
+    score = 0.39 * (total_words / total_sentences) + 11.8 * (syllable_count / total_words) - 15.59
+    return max(0, score)
+
 def analyze_readability(text):
-    """Analyze text readability metrics"""
+    """Analyze text readability metrics without textstat"""
     return {
-        'flesch_reading_ease': textstat.flesch_reading_ease(text),
-        'flesch_kincaid_grade': textstat.flesch_kincaid_grade(text),
-        'gunning_fog': textstat.gunning_fog(text),
-        'smog_index': textstat.smog_index(text),
-        'automated_readability_index': textstat.automated_readability_index(text),
-        'coleman_liau_index': textstat.coleman_liau_index(text)
+        'flesch_reading_ease': calculate_flesch_reading_ease(text),
+        'flesch_kincaid_grade': calculate_flesch_kincaid_grade(text),
+        'gunning_fog': calculate_gunning_fog(text),
+        'automated_readability_index': calculate_automated_readability_index(text)
     }
+
+def calculate_gunning_fog(text):
+    """Calculate Gunning Fog Index"""
+    sentences = sent_tokenize(text)
+    words = word_tokenize(text)
+    
+    if len(sentences) == 0 or len(words) == 0:
+        return 0
+    
+    # Count complex words (words with 3+ syllables)
+    complex_words = 0
+    for word in words:
+        if count_syllables(word) >= 3:
+            complex_words += 1
+    
+    score = 0.4 * ((len(words) / len(sentences)) + 100 * (complex_words / len(words)))
+    return score
+
+def calculate_automated_readability_index(text):
+    """Calculate Automated Readability Index"""
+    sentences = sent_tokenize(text)
+    words = word_tokenize(text)
+    characters = sum(len(word) for word in words)
+    
+    if len(sentences) == 0 or len(words) == 0:
+        return 0
+    
+    score = 4.71 * (characters / len(words)) + 0.5 * (len(words) / len(sentences)) - 21.43
+    return score
 
 def analyze_structure(text):
     """Analyze document structure"""
@@ -122,7 +209,7 @@ def check_academic_tone(text):
     # Remove stopwords and punctuation
     content_words = [word for word in words if word.isalpha() and word not in stop_words]
     
-    # Simple academic word list (you can expand this)
+    # Simple academic word list
     academic_words = {
         'however', 'therefore', 'moreover', 'furthermore', 'consequently',
         'nevertheless', 'notwithstanding', 'accordingly', 'additionally',
@@ -141,7 +228,6 @@ def check_spelling_grammar_issues(text):
     """Basic spelling and grammar checks"""
     issues = []
     
-    # Check for common issues
     sentences = sent_tokenize(text)
     
     for i, sentence in enumerate(sentences):
@@ -266,24 +352,20 @@ def calculate_overall_score(analysis):
     elif passive_voice['passive_percentage'] > 15:
         score -= 8
     
-    # Ensure score is between 0-100
     return max(0, min(100, round(score)))
 
 @app.route('/api/analyze-thesis', methods=['POST'])
 def analyze_thesis():
     """Main endpoint for thesis analysis"""
     try:
-        # Check if file was uploaded
         if 'thesis' not in request.files:
             return jsonify({'error': 'No file uploaded'}), 400
         
         file = request.files['thesis']
         
-        # Check if file was selected
         if file.filename == '':
             return jsonify({'error': 'No file selected'}), 400
         
-        # Check file type
         if not allowed_file(file.filename):
             return jsonify({'error': 'File type not allowed. Please upload PDF, DOC, DOCX, or TXT files.'}), 400
         
@@ -302,9 +384,8 @@ def analyze_thesis():
         else:  # txt
             text = extract_text_from_txt(file_path)
         
-        # Check if text was extracted successfully
         if not text or len(text.strip()) < 100:
-            return jsonify({'error': 'Unable to extract sufficient text from the file. The file may be empty, corrupted, or contain only images.'}), 400
+            return jsonify({'error': 'Unable to extract sufficient text from the file.'}), 400
         
         # Perform analysis
         readability = analyze_readability(text)
@@ -313,7 +394,6 @@ def analyze_thesis():
         academic_tone = check_academic_tone(text)
         spelling_grammar_issues = check_spelling_grammar_issues(text)
         
-        # Combine analysis results
         analysis_results = {
             'readability': readability,
             'structure': structure,
@@ -322,11 +402,10 @@ def analyze_thesis():
             'spelling_grammar_issues': spelling_grammar_issues
         }
         
-        # Generate recommendations and overall score
         recommendations = generate_recommendations(analysis_results)
         overall_score = calculate_overall_score(analysis_results)
         
-        # Clean up temporary file
+        # Clean up
         try:
             os.remove(file_path)
         except:
@@ -345,7 +424,6 @@ def analyze_thesis():
         })
         
     except Exception as e:
-        # Clean up in case of error
         try:
             if 'file_path' in locals():
                 os.remove(file_path)
@@ -356,17 +434,15 @@ def analyze_thesis():
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
-    """Health check endpoint"""
     return jsonify({'status': 'healthy', 'message': 'Thesis analyzer API is running'})
 
 if __name__ == '__main__':
-    # Create uploads directory if it doesn't exist
     os.makedirs('uploads', exist_ok=True)
     
     print("Starting Thesis Analyzer API...")
-    print("API will be available at: http://localhost:5000")
+    print("API will be available at: http://localhost:5001")
     print("Endpoints:")
     print("  GET  /api/health")
     print("  POST /api/analyze-thesis")
     
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=True, host='0.0.0.0', port=5001)
